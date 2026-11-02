@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# DnDevs — DnDevs Board Terminal v2 (Dawa, 2026-11-02). Three terminals:
+#   this one (the board), one Claude window (tabs 1-2), one OpenCode window (tabs 3-5).
+#   source DnDevs                 open the missing seats in their window, then the board
+#   source DnDevs board           board only, launches nothing
+#   source DnDevs --dry-run       show what would open, launches nothing
+#   source DnDevs full | check | log | live (real-time board, Rust engine)
+#   source DnDevs <n> [--restart] [--dry-run]   one seat in its own window
+# Every seat reads the DnDevs canon at start (autoread) and works in low token mode.
+# Rules: ~/.config/dndevs/DNDEVS_CANON.md · view: ~/.config/dndevs/ARCHITECTURE_VIEW.md
+
+# When sourced from zsh, hand over to bash so the board behaves the same everywhere.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    eval 'bash "${(%):-%x}" "$@"'; return $?
+fi
+(
+set -uo pipefail
+
+H=/var/home/VVgbon
+CFG="$H/.config/dndevs"; SEATDIR="$CFG/seats"
+REPO="$H/DnDawa_Binary-Magix"; FORGE="$H/NIGHTGLASS/forge"; RT="$H/Avalhla/memory/roundtable"
+LOGDIR="$H/.local/state/dndevs"; LOG="$LOGDIR/launch.log"
+
+if [[ -t 1 ]]; then
+    R=$'\e[0m' B=$'\e[1m' D=$'\e[2m' RED=$'\e[31m' GRN=$'\e[32m' YEL=$'\e[33m'
+    MAG=$'\e[35m' CYN=$'\e[36m'
+else
+    R="" B="" D="" RED="" GRN="" YEL="" MAG="" CYN=""
+fi
+
+# number|short name|window (C claude, O opencode)|account|folder|process|Konsole profile
+SEATS=(
+"1|Vex·Lhlava|C|dawa.gabond05|$H/Umbra-Keep_Vex-Lhlava|claude|PersonaLhlava13"
+"2|Young.Sage|C|dawa.gabond05|$H/Young-Sage_02|claude|Dawa"
+"3|Lumen|O|dawa.gabond05|$H/Lumen-Castle_Lux-Valhla|opencode|PersonaAngelLux44"
+"4|Av:vA|O|copilot|$H/Destiny-Tower_AvvA-Avalhla|opencode|PersonaAvvA22"
+"5|Z_71|O|openai|$H/Avalhla|opencode|Devil3WaY"
+)
+
+seat() {  # seat <n> -> n name win acct dir proc prof
+    local s
+    for s in "${SEATS[@]}"; do
+        IFS='|' read -r n name win acct dir proc prof <<<"$s"
+        [[ "$n" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+pids_in() {  # PIDs of a process name whose working folder is the folder
+    local pname=$1 pdir=$2 pid
+    local -a found=()
+    for pid in $( { pgrep -x "$pname"; pgrep -f "(^|/)$pname( |$)"; } 2>/dev/null | sort -u); do
+        [[ "$pid" == "$$" || "$pid" == "$BASHPID" ]] && continue
+        [[ "$(readlink "/proc/$pid/cwd" 2>/dev/null)" == "$pdir" ]] && found+=("$pid")
+    done
+    (( ${#found[@]} )) && printf '%s' "${found[*]}"
+    return 0
+}
+
+gui_env() {  # a launch from a plain shell still reaches Dawa's desktop
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [[ -z "${WAYLAND_DISPLAY:-}" && -z "${DISPLAY:-}" ]]; then
+        [[ -S "$XDG_RUNTIME_DIR/wayland-0" ]] && export WAYLAND_DISPLAY=wayland-0
+    fi
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+}
+
+log_launch() {
+    mkdir -p "$LOGDIR"
+    printf '%s | %s\n' "$(date '+%m/%d/%y-%I:%M%p %Z')" "$*" >> "$LOG"
+}
+
+open_window() {  # open_window <C|O> <dry>: one window, one tab per stopped seat
+    local want=$1 dry=$2 s tabs="" title
+    for s in "${SEATS[@]}"; do
+        IFS='|' read -r n name win acct dir proc prof <<<"$s"
+        [[ "$win" == "$want" ]] || continue
+        [[ -n "$(pids_in "$proc" "$dir")" ]] && continue
+        tabs+="title: $n $name;; workdir: $dir;; profile: $prof;; command: $SEATDIR/seat$n.sh"$'\n'
+    done
+    [[ -n "$tabs" ]] || return 0
+    title=$([[ "$want" == C ]] && echo "Claude window" || echo "OpenCode window")
+    if (( dry )); then
+        printf '%s\n%s' "${B}$title would open:${R}" "$tabs"; return 0
+    fi
+    local f; f="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/dndevs-tabs-XXXXXX")"
+    printf '%s' "$tabs" > "$f"
+    gui_env
+    setsid konsole --separate --tabs-from-file "$f" >/dev/null 2>&1 < /dev/null &
+    disown
+    log_launch "$title: $(printf '%s' "$tabs" | sed -n 's/^title: \([^;]*\);.*/\1/p' | paste -sd,)"
+    echo "${GRN}→ $title opened.${R}"
+}
+
+open_seat() {  # open_seat <n> <dry> <restart>: one seat in its own window
+    seat "$1" || { echo "No seat $1."; return 1; }
+    local pids; pids="$(pids_in "$proc" "$dir")"
+    if [[ -n "$pids" ]]; then
+        (( $3 )) || { echo "Seat $n runs (pid $pids). Replace: source DnDevs $n --restart"; return 0; }
+        if (( $2 )); then echo "dry-run: kill $pids"; else kill $pids; sleep 1; fi
+    fi
+    if (( $2 )); then
+        echo "dry-run: konsole --separate --profile $prof --workdir $dir -e $SEATDIR/seat$n.sh"
+        return 0
+    fi
+    gui_env
+    setsid konsole --separate --profile "$prof" --workdir "$dir" -e "$SEATDIR/seat$n.sh" \
+        >/dev/null 2>&1 < /dev/null &
+    disown
+    log_launch "seat $n $name"
+    echo "${GRN}→ seat $n $name opened.${R}"
+}
+
+dot() {  # dot <n>: ● running or ○ stopped, with the seat name
+    seat "$1" || return 0
+    if [[ -n "$(pids_in "$proc" "$dir")" ]]; then
+        printf '%s' "${GRN}●${R} $n $name"
+    else
+        printf '%s' "${YEL}○${R} $n $name"
+    fi
+}
+
+board() {  # the Rust engine when built, this shell version otherwise
+    if [[ -x "$H/bin/dndevs-board" ]]; then "$H/bin/dndevs-board"; return; fi
+    board_sh
+}
+
+board_sh() {  # the useful information only, at most 96 columns
+    local now rh verdict st issues next
+    now="$(date '+%m/%d/%y-%I:%M%p %Z')"
+    printf '%s\n' "${MAG}${B}╔═ DnDevs · $now ═ Dawa decides · ~]{OK from Dawa only ═╗${R}"
+    printf '%-9s %-22s %-22s\n' "CLAUDE" "$(dot 1)" "$(dot 2)"
+    printf '%-9s %-22s %-22s %s\n' "OPENCODE" "$(dot 3)" "$(dot 4)" "$(dot 5)"
+    st="$(ls -t "$FORGE"/stack/stack*.mbox 2>/dev/null | head -1)"
+    rh="$(ls -t "$FORGE"/stack/rehearsal*.log 2>/dev/null | head -1)"
+    verdict="$(grep -E 'REHEARSAL (PASS|FAIL)' "$rh" 2>/dev/null | tail -1)"
+    case "$verdict" in *PASS*) verdict="${GRN}PASS${R}" ;; *FAIL*) verdict="${RED}FAIL${R}" ;; *) verdict="?" ;; esac
+    printf '%-9s main %s · %s rehearsal %s (%s)\n' "FORGE" \
+        "$(git -C "$REPO" rev-parse --short main 2>/dev/null)" "$(basename "${st%.mbox}")" \
+        "$verdict" "$(grep -o 'full_tree=[0-9a-f]*' "$rh" 2>/dev/null | tail -1 | cut -d= -f2)"
+    issues="$(cd "$RT" 2>/dev/null && timeout 20 python3 roundtable_audit.py --strict 2>&1 \
+        | grep -c "^  - '")"
+    [[ "${issues:-0}" == 0 ]] && issues="${GRN}clean${R}" || issues="${YEL}$issues issue(s)${R}"
+    printf '%-9s inbox %s · outbox %s · audit %s\n' "ROUNDTBL" \
+        "$(ls "$RT/inbox" 2>/dev/null | wc -l)" "$(ls "$RT/outbox" 2>/dev/null | wc -l)" "$issues"
+    next="$(grep -v '^#' "$CFG/NEXT.md" 2>/dev/null | grep -v '^\s*$' | head -1)"
+    printf '%-9s %s\n' "NEXT" "${CYN}${next:-(no next action written)}${R}"
+}
+
+full() {  # the detailed view: every seat with account, branch and pids
+    printf "${B}%-2s %-11s %-9s %-14s %-17s %s${R}\n" "#" "Seat" "Window" "Account" "Branch" "PIDs"
+    local s br
+    for s in "${SEATS[@]}"; do
+        IFS='|' read -r n name win acct dir proc prof <<<"$s"
+        br="$(git -C "$dir" branch --show-current 2>/dev/null)"
+        printf "%-2s %-11s %-9s %-14.14s %-17.17s %s\n" "$n" "$name" \
+            "$([[ $win == C ]] && echo claude || echo opencode)" "$acct" "${br:--}" \
+            "$(pids_in "$proc" "$dir")"
+    done
+    printf '%-2s %-11s %-9s %s\n' "6" "Old.Sage_20" "cloud" "reaches VVgBazz by Desktop Commander"
+    printf 'signed: %s\n' "$(tail -1 "$FORGE/SIGNATURES.md" 2>/dev/null | cut -c1-86)"
+}
+
+check() {  # read-only: OpenCode MCP and the seat scripts
+    printf '%s\n' "${CYN}── OpenCode MCP ──${R}"
+    timeout 30 "$H/.opencode/bin/opencode" mcp list 2>&1 | head -5
+    printf '%s\n' "${CYN}── seat scripts ──${R}"
+    local f
+    for f in "$SEATDIR"/seat*.sh; do
+        bash -n "$f" && echo "ok  ${f##*/}" || echo "BAD ${f##*/}"
+    done
+}
+
+menu() {
+    local c
+    while true; do
+        printf '%s' "${B}r refresh · w live · f full · c check · l log · q quit: ${R}"
+        read -r c || break
+        case "$c" in
+            q|Q|"") break ;;
+            r|R) board ;;
+            w|W) "$H/bin/dndevs-board" --watch 2 ;;
+            f|F) full ;;
+            c|C) check ;;
+            l|L) tail -10 "$LOG" 2>/dev/null || echo "No launch logged yet." ;;
+            *) echo "?" ;;
+        esac
+    done
+}
+
+MODE="start" SEAT="" DRY=0 RESTART=0 RC=0
+for a in "$@"; do
+    case "$a" in
+        board|full|check|log|live) MODE="$a" ;;
+        --dry-run) DRY=1 ;;
+        --restart) RESTART=1 ;;
+        -h|--help) MODE="help" ;;
+        [1-5]) SEAT="$a"; MODE="seat" ;;
+        *) echo "DnDevs: unknown argument: $a (use --help)"; MODE="none"; RC=1 ;;
+    esac
+done
+
+case "$MODE" in
+    help)  sed -n '2,11p' "$(readlink -f -- "${BASH_SOURCE[0]:-$0}")" | sed 's/^# \{0,1\}//' ;;
+    start) open_window C "$DRY"; open_window O "$DRY"; board; (( DRY )) || { echo; menu; } ;;
+    board) board ;;
+    full)  board; full ;;
+    check) check ;;
+    live)  "$H/bin/dndevs-board" --watch 2 ;;
+    log)   tail -10 "$LOG" 2>/dev/null || echo "No launch logged yet." ;;
+    seat)  open_seat "$SEAT" "$DRY" "$RESTART" ;;
+    none)  exit "$RC" ;;
+esac
+)

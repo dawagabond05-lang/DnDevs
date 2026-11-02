@@ -1,0 +1,1 @@
+Boot (DnDevs autoread): read ~/.config/dndevs/DNDEVS_CANON.md and ~/.config/dndevs/ARCHITECTURE_VIEW.md, then the live state (git status, branch, HEAD, last 3 commits). Reply in French, at most 6 lines of 96 columns: the ARCHITECTURE view of your lane and the one next useful action. Change nothing.
